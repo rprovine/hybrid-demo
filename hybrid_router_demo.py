@@ -9,19 +9,107 @@ import anthropic
 import openai
 import time
 import re
+import subprocess
 from datetime import datetime
 
-# Configuration
-LOCAL_MODEL = "deepseek-r1:7b"
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
-OPENAI_MODEL = "gpt-4o"
-
-# Pricing (per 1M tokens)
-PRICING = {
-    "local": {"input": 0, "output": 0},
-    "claude": {"input": 3.00, "output": 15.00},
-    "gpt4": {"input": 2.50, "output": 10.00}
+# Cloud Model Configurations
+CLOUD_MODELS = {
+    "Claude Sonnet 4": {
+        "id": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "description": "Fast & capable. Best for most business tasks, coding, and analysis.",
+        "pricing": {"input": 3.00, "output": 15.00},
+        "best_for": ["Daily tasks", "Code generation", "Quick analysis", "Cost-effective"]
+    },
+    "Claude Opus 4": {
+        "id": "claude-opus-4-20250514",
+        "provider": "anthropic",
+        "description": "Most powerful Claude. Best for complex reasoning and research.",
+        "pricing": {"input": 15.00, "output": 75.00},
+        "best_for": ["Complex analysis", "Research", "Strategic planning", "Nuanced writing"]
+    },
+    "GPT-4o": {
+        "id": "gpt-4o",
+        "provider": "openai",
+        "description": "OpenAI's flagship. Strong at creative tasks and general knowledge.",
+        "pricing": {"input": 2.50, "output": 10.00},
+        "best_for": ["Creative writing", "General tasks", "Multimodal", "Wide knowledge"]
+    },
+    "GPT-4o Mini": {
+        "id": "gpt-4o-mini",
+        "provider": "openai",
+        "description": "Fast & affordable OpenAI model. Good for simpler cloud tasks.",
+        "pricing": {"input": 0.15, "output": 0.60},
+        "best_for": ["Simple tasks", "High volume", "Budget-friendly", "Quick responses"]
+    }
 }
+
+# Local model descriptions (matched by name patterns)
+LOCAL_MODEL_INFO = {
+    "deepseek-r1": {
+        "description": "Excellent reasoning model. Great for logic, math, and step-by-step thinking.",
+        "best_for": ["Reasoning", "Math", "Logic puzzles", "Code review"]
+    },
+    "llama3": {
+        "description": "Meta's versatile model. Good all-around performance for general tasks.",
+        "best_for": ["General tasks", "Conversation", "Summarization", "Q&A"]
+    },
+    "qwen": {
+        "description": "Strong multilingual model. Excellent for coding and technical tasks.",
+        "best_for": ["Coding", "Technical docs", "Multilingual", "Analysis"]
+    },
+    "mistral": {
+        "description": "Efficient European model. Fast and capable for its size.",
+        "best_for": ["Fast inference", "European languages", "Efficient", "General tasks"]
+    },
+    "codellama": {
+        "description": "Specialized for code. Best choice for programming tasks.",
+        "best_for": ["Code generation", "Debugging", "Code explanation", "Programming"]
+    },
+    "phi": {
+        "description": "Microsoft's small but mighty model. Surprisingly capable for its size.",
+        "best_for": ["Resource-limited", "Quick tasks", "Edge deployment", "Efficiency"]
+    }
+}
+
+def get_local_model_info(model_name: str) -> dict:
+    """Get description info for a local model based on its name"""
+    model_lower = model_name.lower()
+    for pattern, info in LOCAL_MODEL_INFO.items():
+        if pattern in model_lower:
+            return info
+    return {
+        "description": "Local model running on your hardware. Fast, free, and private.",
+        "best_for": ["Privacy", "No API costs", "Fast responses", "Offline capable"]
+    }
+
+def get_available_local_models() -> list:
+    """Fetch list of models available in Ollama"""
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')[1:]  # Skip header
+            models = []
+            for line in lines:
+                if line.strip():
+                    model_name = line.split()[0]
+                    models.append(model_name)
+            return models if models else ["No models found"]
+        return ["Error fetching models"]
+    except Exception as e:
+        return [f"Error: {str(e)}"]
+
+# Pricing lookup (per 1M tokens)
+def get_pricing(model_key: str) -> dict:
+    """Get pricing for a model"""
+    if model_key in CLOUD_MODELS:
+        return CLOUD_MODELS[model_key]["pricing"]
+    return {"input": 0, "output": 0}  # Local models are free
 
 # Initialize session state
 if 'queries' not in st.session_state:
@@ -110,13 +198,13 @@ def calculate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
            (output_tokens * pricing["output"] / 1_000_000)
     return cost
 
-def local_inference(query: str) -> dict:
+def local_inference(query: str, model: str) -> dict:
     """Run inference on local Ollama model"""
     start_time = time.time()
 
     try:
         response = ollama.chat(
-            model=LOCAL_MODEL,
+            model=model,
             messages=[{"role": "user", "content": query}]
         )
 
@@ -126,7 +214,7 @@ def local_inference(query: str) -> dict:
         return {
             "success": True,
             "response": response_text,
-            "model": LOCAL_MODEL,
+            "model": model,
             "latency": end_time - start_time,
             "tokens_per_sec": estimate_tokens(response_text) / (end_time - start_time),
             "cost": 0.0,
@@ -137,43 +225,53 @@ def local_inference(query: str) -> dict:
         return {
             "success": False,
             "error": str(e),
-            "model": LOCAL_MODEL
+            "model": model
         }
 
-def cloud_inference(query: str, provider: str = "claude") -> dict:
+def cloud_inference(query: str, cloud_model_key: str) -> dict:
     """Run inference on cloud API"""
     start_time = time.time()
 
+    model_config = CLOUD_MODELS.get(cloud_model_key)
+    if not model_config:
+        return {"success": False, "error": f"Unknown cloud model: {cloud_model_key}", "model": cloud_model_key}
+
+    model_id = model_config["id"]
+    provider = model_config["provider"]
+    pricing = model_config["pricing"]
+
     try:
-        if provider == "claude":
+        if provider == "anthropic":
             client = anthropic.Anthropic()
             response = client.messages.create(
-                model=ANTHROPIC_MODEL,
+                model=model_id,
                 max_tokens=2000,
                 messages=[{"role": "user", "content": query}]
             )
             response_text = response.content[0].text
             input_tokens = response.usage.input_tokens
             output_tokens = response.usage.output_tokens
-            cost = calculate_cost(input_tokens, output_tokens, "claude")
 
         else:  # OpenAI
             client = openai.OpenAI()
             response = client.chat.completions.create(
-                model=OPENAI_MODEL,
+                model=model_id,
                 messages=[{"role": "user", "content": query}]
             )
             response_text = response.choices[0].message.content
             input_tokens = response.usage.prompt_tokens
             output_tokens = response.usage.completion_tokens
-            cost = calculate_cost(input_tokens, output_tokens, "gpt4")
 
         end_time = time.time()
+
+        # Calculate cost
+        cost = (input_tokens * pricing["input"] / 1_000_000) + \
+               (output_tokens * pricing["output"] / 1_000_000)
 
         return {
             "success": True,
             "response": response_text,
-            "model": ANTHROPIC_MODEL if provider == "claude" else OPENAI_MODEL,
+            "model": f"{cloud_model_key} ({model_id})",
             "latency": end_time - start_time,
             "cost": cost,
             "input_tokens": input_tokens,
@@ -183,7 +281,7 @@ def cloud_inference(query: str, provider: str = "claude") -> dict:
         return {
             "success": False,
             "error": str(e),
-            "model": provider
+            "model": cloud_model_key
         }
 
 # Streamlit UI
@@ -220,18 +318,87 @@ st.markdown("""
 # Header
 st.title("🤖 LeniLani AI Hybrid Router")
 st.markdown("### Smart AI that knows when to run local vs. cloud")
+
+# Model Guide
+with st.expander("📚 **Model Selection Guide** - When to use each model"):
+    st.markdown("""
+    ### 🏠 Local Models (Free, Private, Fast)
+    Run on your hardware. Data never leaves your machine. Best for:
+
+    | Model | Best For | Speed |
+    |-------|----------|-------|
+    | **DeepSeek-R1** | Reasoning, math, logic, step-by-step thinking | Fast |
+    | **Qwen** | Coding, technical docs, multilingual | Fast |
+    | **Llama 3** | General tasks, conversation, Q&A | Fast |
+    | **CodeLlama** | Programming, debugging, code review | Fast |
+    | **Mistral** | Efficient general tasks, European languages | Very Fast |
+
+    ### ☁️ Cloud Models (Powerful, Paid)
+    API-based. Use for complex tasks that need maximum capability:
+
+    | Model | Best For | Cost |
+    |-------|----------|------|
+    | **Claude Sonnet 4** | Daily tasks, coding, quick analysis | $$ |
+    | **Claude Opus 4** | Complex reasoning, research, strategic planning | $$$$ |
+    | **GPT-4o** | Creative writing, general knowledge, multimodal | $$ |
+    | **GPT-4o Mini** | Simple cloud tasks, high volume, budget-friendly | $ |
+
+    ### 💡 Quick Decision Guide
+    - **Simple question?** → Local model (free!)
+    - **Need deep analysis?** → Claude Opus 4
+    - **Coding task?** → DeepSeek-R1 or Qwen locally, or Claude Sonnet 4
+    - **Creative writing?** → GPT-4o
+    - **Budget-conscious?** → Local first, GPT-4o Mini for cloud
+    - **Privacy critical?** → Always local
+    """)
+
 st.markdown("---")
 
 # Sidebar - Configuration & Stats
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ Model Selection")
 
-    st.markdown("**Local Model:**")
-    st.code(LOCAL_MODEL)
+    # Get available local models
+    available_local_models = get_available_local_models()
 
-    st.markdown("**Cloud Models:**")
-    st.code(f"Claude: {ANTHROPIC_MODEL}")
-    st.code(f"GPT-4: {OPENAI_MODEL}")
+    # Local Model Selection
+    st.markdown("**🏠 Local Model**")
+    selected_local_model = st.selectbox(
+        "Choose local model:",
+        available_local_models,
+        index=0 if available_local_models else 0,
+        key="local_model_select"
+    )
+
+    # Show local model info
+    if selected_local_model and not selected_local_model.startswith("Error"):
+        local_info = get_local_model_info(selected_local_model)
+        st.caption(f"_{local_info['description']}_")
+        with st.expander("Best for"):
+            for use in local_info['best_for']:
+                st.markdown(f"• {use}")
+
+    st.markdown("---")
+
+    # Cloud Model Selection
+    st.markdown("**☁️ Cloud Model**")
+    cloud_model_options = list(CLOUD_MODELS.keys())
+    selected_cloud_model = st.selectbox(
+        "Choose cloud model:",
+        cloud_model_options,
+        index=0,
+        key="cloud_model_select"
+    )
+
+    # Show cloud model info
+    if selected_cloud_model:
+        cloud_info = CLOUD_MODELS[selected_cloud_model]
+        st.caption(f"_{cloud_info['description']}_")
+        pricing = cloud_info['pricing']
+        st.caption(f"💰 ${pricing['input']:.2f} in / ${pricing['output']:.2f} out per 1M tokens")
+        with st.expander("Best for"):
+            for use in cloud_info['best_for']:
+                st.markdown(f"• {use}")
 
     st.markdown("---")
 
@@ -340,17 +507,22 @@ if query and (run_auto or force_local or force_cloud):
     else:
         route = analysis['route']
 
+    # Get selected models from session state
+    local_model = st.session_state.get('local_model_select', available_local_models[0] if available_local_models else "deepseek-r1:7b")
+    cloud_model = st.session_state.get('cloud_model_select', 'Claude Sonnet 4')
+
     # Show routing decision
     st.markdown("---")
-    st.markdown(f"### 🎯 Routing to: <span class='{'local-route' if route == 'local' else 'cloud-route'}'>{route.upper()}</span>",
+    model_display = local_model if route == "local" else cloud_model
+    st.markdown(f"### 🎯 Routing to: <span class='{'local-route' if route == 'local' else 'cloud-route'}'>{route.upper()}</span> → {model_display}",
                unsafe_allow_html=True)
 
     # Execute query
-    with st.spinner(f"Processing with {route} model..."):
+    with st.spinner(f"Processing with {model_display}..."):
         if route == "local":
-            result = local_inference(query)
+            result = local_inference(query, local_model)
         else:
-            result = cloud_inference(query, provider="claude")
+            result = cloud_inference(query, cloud_model)
 
     # Display results
     if result['success']:
